@@ -1,92 +1,151 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Fusarium TEF1 metabarcoding",
-  "description": "EPI2ME Desktop compatible workflow: trimming -> filtering -> clustering -> BLAST -> tables + HTML report.",
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "$id": "https://raw.githubusercontent.com/IDENTXX/wf-fusarium-tef1/main/nextflow_schema.json",
+  "title": "IDENTXX/wf-fusarium-tef1",
+  "workflow_title": "Fusarium TEF1 metabarcoding",
+  "description": "Primer trimming -> filtering -> clustering -> BLAST vs TEF1 reference -> tables + HTML report.",
+  "url": "https://github.com/IDENTXX/wf-fusarium-tef1",
   "type": "object",
-  "properties": {
-    "reads": {
-      "title": "Reads root directory",
-      "type": "string",
-      "format": "path",
-      "description": "Directory containing per-sample subfolders with FASTQ.gz files (READS_ROOT/Sample01/*.fastq.gz)."
-    },
-    "db_fasta": {
-      "title": "TEF1 reference FASTA",
-      "type": "string",
-      "format": "file-path",
-      "description": "FASTA used to build the BLAST database (e.g. Fusarium TEF1 reference set)."
-    },
-    "out_dir": {
-      "title": "Output directory",
-      "type": "string",
-      "format": "path",
-      "default": "output"
+
+  "definitions": {
+    "input": {
+      "title": "Input Options",
+      "type": "object",
+      "fa_icon": "fas fa-arrow-right",
+      "properties": {
+        "reads": {
+          "type": "string",
+          "format": "path",
+          "title": "Reads root directory",
+          "description": "Directory with one level of sample/barcode subfolders containing FASTQ.gz files.",
+          "help_text": "Example: READS_ROOT/Sample_01/*.fastq.gz"
+        },
+        "db_fasta": {
+          "type": "string",
+          "format": "file-path",
+          "title": "TEF1 reference FASTA",
+          "description": "FASTA used to build the BLAST database (TEF1 reference set)."
+        }
+      },
+      "required": ["reads", "db_fasta"]
     },
 
-    "primer_fwd": {
-      "title": "Forward primer",
-      "type": "string",
-      "default": ""
-    },
-    "primer_rev": {
-      "title": "Reverse primer",
-      "type": "string",
-      "default": ""
-    },
-    "require_primers": {
-      "title": "Discard reads without primer match",
-      "type": "boolean",
-      "default": true
-    },
-    "trim_error_rate": {
-      "title": "Cutadapt error rate",
-      "type": "number",
-      "default": 0.12,
-      "minimum": 0.0,
-      "maximum": 0.3
-    },
-
-    "min_q": {
-      "title": "Minimum Q-score",
-      "type": "integer",
-      "default": 9,
-      "minimum": 0,
-      "maximum": 30
-    },
-    "min_len": {
-      "title": "Minimum length",
-      "type": "integer",
-      "default": 300,
-      "minimum": 1
-    },
-    "max_len": {
-      "title": "Maximum length",
-      "type": "integer",
-      "default": 1200,
-      "minimum": 1
+    "primer": {
+      "title": "Primer Options",
+      "type": "object",
+      "fa_icon": "fas fa-cut",
+      "properties": {
+        "primer_fwd": {
+          "type": "string",
+          "title": "Forward primer",
+          "default": "",
+          "description": "If empty (or reverse empty), primer trimming is skipped."
+        },
+        "primer_rev": {
+          "type": "string",
+          "title": "Reverse primer",
+          "default": "",
+          "description": "If empty (or forward empty), primer trimming is skipped."
+        },
+        "require_primers": {
+          "type": "boolean",
+          "title": "Discard reads without primer match",
+          "default": true
+        },
+        "trim_error_rate": {
+          "type": "number",
+          "title": "Cutadapt error rate",
+          "default": 0.12,
+          "minimum": 0.0,
+          "maximum": 0.3
+        }
+      }
     },
 
-    "cluster_id": {
-      "title": "Clustering identity (VSEARCH)",
-      "type": "number",
-      "default": 0.9,
-      "minimum": 0.5,
-      "maximum": 1.0
-    },
-    "min_cluster_reads": {
-      "title": "Minimum reads per cluster",
-      "type": "integer",
-      "default": 20,
-      "minimum": 1
+    "filter": {
+      "title": "Filtering Options",
+      "type": "object",
+      "fa_icon": "fas fa-filter",
+      "properties": {
+        "min_q": {
+          "type": "integer",
+          "title": "Minimum Q-score",
+          "default": 9,
+          "minimum": 0,
+          "maximum": 30
+        },
+        "min_len": {
+          "type": "integer",
+          "title": "Minimum length",
+          "default": 300,
+          "minimum": 1
+        },
+        "max_len": {
+          "type": "integer",
+          "title": "Maximum length",
+          "default": 1200,
+          "minimum": 1
+        }
+      }
     },
 
-    "blast_topn": {
-      "title": "BLAST max targets per query",
-      "type": "integer",
-      "default": 5,
-      "minimum": 1,
-      "maximum": 50
+    "clustering": {
+      "title": "Clustering Options",
+      "type": "object",
+      "fa_icon": "fas fa-project-diagram",
+      "properties": {
+        "cluster_id": {
+          "type": "number",
+          "title": "Clustering identity (VSEARCH)",
+          "default": 0.9,
+          "minimum": 0.5,
+          "maximum": 1.0
+        },
+        "min_cluster_reads": {
+          "type": "integer",
+          "title": "Minimum reads per cluster",
+          "default": 20,
+          "minimum": 1
+        }
+      }
+    },
+
+    "blast": {
+      "title": "BLAST Options",
+      "type": "object",
+      "fa_icon": "fas fa-search",
+      "properties": {
+        "blast_topn": {
+          "type": "integer",
+          "title": "BLAST max targets per query",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 50
+        }
+      }
+    },
+
+    "output": {
+      "title": "Output Options",
+      "type": "object",
+      "fa_icon": "fas fa-folder-open",
+      "properties": {
+        "out_dir": {
+          "type": "string",
+          "format": "path",
+          "title": "Output directory",
+          "default": "output"
+        }
+      }
     }
   },
-  "required": ["reads", "db_fasta"]
+
+  "allOf": [
+    { "$ref": "#/definitions/input" },
+    { "$ref": "#/definitions/primer" },
+    { "$ref": "#/definitions/filter" },
+    { "$ref": "#/definitions/clustering" },
+    { "$ref": "#/definitions/blast" },
+    { "$ref": "#/definitions/output" }
+  ]
 }
