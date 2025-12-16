@@ -1,44 +1,49 @@
 nextflow.enable.dsl = 2
 
-// --------------------
-// Channels (input: reads are already separated by sample/barcode folders)
-// --------------------
-Channel
-  .fromPath("${params.reads}/*/*.fastq.gz", checkIfExists: true)
-  .map { f -> tuple(f.parent.name, f) }
-  .groupTuple()
-  .map { sample, files -> tuple(sample, files.sort()) }
-  .set { ch_samples }
+/*
+  Important: EPI2ME refreshes/inspects workflows without user params.
+  So we MUST NOT fail if params.reads / params.db_fasta are not set yet.
+*/
 
-// --------------------
-// Workflow
-// --------------------
 workflow {
 
-  merged = MERGE_FASTQ(ch_samples)
+  if( !params.reads || !params.db_fasta ) {
+    log.info "Parameters --reads and/or --db_fasta not set yet (UI refresh). Skipping execution."
+    return
+  }
 
-  qc_raw = QC_SEQKIT(merged)
+  // Input: READS_ROOT/Sample/*fastq.gz
+  Channel
+    .fromPath("${params.reads}/*/*.fastq.gz")
+    .map { f -> tuple(f.parent.name, f) }
+    .groupTuple()
+    .map { sample, files -> tuple(sample, files.sort()) }
+    .set { ch_samples }
 
-  trimmed = (params.primer_fwd?.trim() && params.primer_rev?.trim()) ? TRIM_CUTADAPT(merged) : merged
+  merged   = MERGE_FASTQ(ch_samples)
+  qc_raw   = QC_SEQKIT(merged)
 
+  trimmed  = (params.primer_fwd?.trim() && params.primer_rev?.trim()) ? TRIM_CUTADAPT(merged) : merged
   filtered = FILTER_NANOFILT(trimmed)
 
-  fasta = FASTQ_TO_FASTA(filtered)
+  fasta    = FASTQ_TO_FASTA(filtered)
+  clustered= CLUSTER_VSEARCH(fasta)
+  kept     = FILTER_CLUSTERS(clustered)
 
-  clustered = CLUSTER_VSEARCH(fasta)
+  // Build BLAST DB once and broadcast it to all samples
+  ref_fa   = Channel.value( file(params.db_fasta) )
+  dbdir_ch = MAKEBLASTDB(ref_fa)
+  dbdir_bc = dbdir_ch.broadcast()
 
-  kept = FILTER_CLUSTERS(clustered)
+  blasted  = BLASTN(kept, dbdir_bc)
+  tax      = JOIN_COUNTS_BLAST(blasted)
 
-  db = MAKEBLASTDB(params.db_fasta)
+  // Aggregate all sample tax tables
+  summary  = AGGREGATE_RESULTS( tax.map{ it[1] }.collect() )
 
-  blasted = BLASTN(kept, db)
-
-  tax = JOIN_COUNTS_BLAST(blasted)
-
-  agg = AGGREGATE_RESULTS(tax)
-
-  REPORT_HTML(agg)
+  REPORT_HTML(summary)
 }
+
 
 // --------------------
 // Processes
@@ -55,7 +60,6 @@ process MERGE_FASTQ {
   tuple val(sample), path("${sample}.fastq.gz")
 
   """
-  # Concatenating gz streams is valid (keeps compression, fast, no re-gzip)
   cat ${reads.join(' ')} > ${sample}.fastq.gz
   """
 }
@@ -63,14 +67,13 @@ process MERGE_FASTQ {
 process QC_SEQKIT {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/qc", mode: 'copy'
-
   container "quay.io/biocontainers/seqkit:2.6.1--h9ee0642_0"
 
   input:
   tuple val(sample), path(fq)
 
   output:
-  tuple val(sample), path("${sample}.seqkit.stats.tsv"), emit: stats
+  tuple val(sample), path("${sample}.seqkit.stats.tsv")
 
   """
   seqkit stats -a -T ${fq} > ${sample}.seqkit.stats.tsv
@@ -80,7 +83,6 @@ process QC_SEQKIT {
 process TRIM_CUTADAPT {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/reads", mode: 'copy'
-
   container "quay.io/biocontainers/cutadapt:4.9--py311h1f90b4d_0"
 
   input:
@@ -105,7 +107,6 @@ process TRIM_CUTADAPT {
 process FILTER_NANOFILT {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/reads", mode: 'copy'
-
   container "quay.io/biocontainers/nanofilt:2.8.0--pyhdfd78af_0"
 
   input:
@@ -124,7 +125,6 @@ process FILTER_NANOFILT {
 process FASTQ_TO_FASTA {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/clusters", mode: 'copy'
-
   container "quay.io/biocontainers/seqkit:2.6.1--h9ee0642_0"
 
   input:
@@ -141,7 +141,6 @@ process FASTQ_TO_FASTA {
 process CLUSTER_VSEARCH {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/clusters", mode: 'copy'
-
   container "quay.io/biocontainers/vsearch:2.28.1--h6a68c12_0"
 
   input:
@@ -166,7 +165,6 @@ process CLUSTER_VSEARCH {
 process FILTER_CLUSTERS {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/clusters", mode: 'copy'
-
   container "quay.io/biocontainers/seqkit:2.6.1--h9ee0642_0"
 
   input:
@@ -178,9 +176,6 @@ process FILTER_CLUSTERS {
         path("${sample}.centroids.kept.fasta")
 
   """
-  # Build centroid counts from UC:
-  # - "S" = seed/centroid line (query label in col 9)
-  # - "H" = hit assigned to a centroid (cluster number in col 2)
   awk -F'\\t' '
     BEGIN{OFS="\\t"}
     \$1=="S"{cl=\$2; id=\$9; centroid[cl]=id; count[id]=1; next}
@@ -193,7 +188,6 @@ process FILTER_CLUSTERS {
   if [ -s keep_ids.txt ]; then
     seqkit grep -f keep_ids.txt ${centroids} > ${sample}.centroids.kept.fasta
   else
-    # No clusters pass threshold -> create empty fasta so downstream steps are predictable
     : > ${sample}.centroids.kept.fasta
   fi
   """
@@ -201,14 +195,13 @@ process FILTER_CLUSTERS {
 
 process MAKEBLASTDB {
   publishDir "${params.out_dir}/refdb", mode: 'copy'
-
   container "quay.io/biocontainers/blast:2.16.0--pl5321h6f7f691_0"
 
   input:
   path(db_fasta)
 
   output:
-  path("blastdb"), emit: dbdir
+  path("blastdb")
 
   """
   mkdir -p blastdb
@@ -220,7 +213,6 @@ process MAKEBLASTDB {
 process BLASTN {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/taxonomy", mode: 'copy'
-
   container "quay.io/biocontainers/blast:2.16.0--pl5321h6f7f691_0"
 
   input:
@@ -228,9 +220,7 @@ process BLASTN {
   path(dbdir)
 
   output:
-  tuple val(sample),
-        path(counts),
-        path("${sample}.blast.tsv")
+  tuple val(sample), path(counts), path("${sample}.blast.tsv")
 
   """
   if [ ! -s ${centroids_fa} ]; then
@@ -251,14 +241,13 @@ process BLASTN {
 process JOIN_COUNTS_BLAST {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/taxonomy", mode: 'copy'
-
   container "python:3.11-slim"
 
   input:
   tuple val(sample), path(counts_tsv), path(blast_tsv)
 
   output:
-  path("${sample}.taxonomy.tsv")
+  tuple val(sample), path("${sample}.taxonomy.tsv")
 
   """
   python - << 'PY'
@@ -270,27 +259,20 @@ process JOIN_COUNTS_BLAST {
   blast_path  = Path("${blast_tsv}")
   out_path    = Path(f"{sample}.taxonomy.tsv")
 
-  # Read best hit per query (first occurrence; BLAST is typically sorted by score)
   best = {}
   if blast_path.exists() and blast_path.stat().st_size > 0:
     with blast_path.open() as f:
       for row in csv.reader(f, delimiter='\\t'):
-        qseqid = row[0]
-        if qseqid in best:
+        q = row[0]
+        if q in best:
           continue
-        best[qseqid] = {
-          "sseqid": row[1],
-          "pident": row[2],
-          "qcovs": row[7],
-          "stitle": row[8] if len(row) > 8 else ""
-        }
+        best[q] = {"sseqid": row[1], "pident": row[2], "qcovs": row[7], "stitle": row[8] if len(row)>8 else ""}
 
   with out_path.open("w", newline="") as out:
     w = csv.writer(out, delimiter='\\t')
     w.writerow(["cluster_id","read_count","best_sseqid","pident","qcovs","best_hit_title"])
     with counts_path.open() as f:
-      for row in csv.reader(f, delimiter='\\t'):
-        cid, n = row[0], row[1]
+      for cid, n in csv.reader(f, delimiter='\\t'):
         hit = best.get(cid, {"sseqid":"NA","pident":"NA","qcovs":"NA","stitle":"NA"})
         w.writerow([cid, n, hit["sseqid"], hit["pident"], hit["qcovs"], hit["stitle"]])
   PY
@@ -299,28 +281,29 @@ process JOIN_COUNTS_BLAST {
 
 process AGGREGATE_RESULTS {
   publishDir "${params.out_dir}/summary", mode: 'copy'
-
   container "python:3.11-slim"
 
   input:
-  path(tables) from Channel.fromPath("${params.out_dir}/per_sample/*/taxonomy/*.taxonomy.tsv").collect()
+  path(tables)
 
   output:
   path("all_samples.long.tsv"),
   path("abundance_matrix.tsv")
 
   """
+  # tables can expand to multiple file paths
+  printf "%s\\n" ${tables} > tables.list
+
   python - << 'PY'
   import csv
   from pathlib import Path
   from collections import defaultdict
 
-  tables = [Path(p) for p in "${tables}".split()]
+  tables = [Path(l.strip()) for l in open("tables.list") if l.strip()]
   long_rows = []
   taxa = set()
   samples = set()
 
-  # Long format
   for t in tables:
     sample = t.name.split(".taxonomy.tsv")[0]
     samples.add(sample)
@@ -329,27 +312,16 @@ process AGGREGATE_RESULTS {
       for row in r:
         tax = row["best_sseqid"] if row["best_sseqid"] != "NA" else "NA"
         taxa.add(tax)
-        long_rows.append({
-          "sample": sample,
-          "cluster_id": row["cluster_id"],
-          "read_count": int(row["read_count"]),
-          "taxon": tax,
-          "pident": row["pident"],
-          "qcovs": row["qcovs"],
-          "title": row["best_hit_title"],
-        })
+        long_rows.append([sample, row["cluster_id"], int(row["read_count"]), tax, row["pident"], row["qcovs"], row["best_hit_title"]])
 
-  # Write long table
   with open("all_samples.long.tsv", "w", newline="") as out:
     w = csv.writer(out, delimiter='\\t')
     w.writerow(["sample","cluster_id","read_count","taxon","pident","qcovs","title"])
-    for row in long_rows:
-      w.writerow([row["sample"], row["cluster_id"], row["read_count"], row["taxon"], row["pident"], row["qcovs"], row["title"]])
+    w.writerows(long_rows)
 
-  # Pivot abundance: sample x taxon
   matrix = defaultdict(lambda: defaultdict(int))
-  for row in long_rows:
-    matrix[row["sample"]][row["taxon"]] += row["read_count"]
+  for s, _, n, tax, *_ in long_rows:
+    matrix[s][tax] += n
 
   taxa = sorted(taxa)
   samples = sorted(samples)
@@ -365,12 +337,10 @@ process AGGREGATE_RESULTS {
 
 process REPORT_HTML {
   publishDir "${params.out_dir}", mode: 'copy'
-
   container "python:3.11-slim"
 
   input:
-  path("all_samples.long.tsv"),
-  path("abundance_matrix.tsv")
+  tuple path(long_tsv), path(mat_tsv)
 
   output:
   path("wf-fusarium-tef1-report.html")
@@ -379,44 +349,21 @@ process REPORT_HTML {
   python - << 'PY'
   from pathlib import Path
 
-  long_tsv = Path("all_samples.long.tsv")
-  mat_tsv  = Path("abundance_matrix.tsv")
-
-  html = f\"\"\"<!doctype html>
-  <html>
-  <head>
-    <meta charset="utf-8"/>
-    <title>Fusarium TEF1 metabarcoding report</title>
-    <style>
-      body {{ font-family: Arial, sans-serif; margin: 24px; }}
-      code, pre {{ background: #f5f5f5; padding: 2px 4px; }}
-      .box {{ border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 12px 0; }}
-      a {{ text-decoration: none; }}
-    </style>
-  </head>
-  <body>
-    <h1>Fusarium TEF1 metabarcoding report</h1>
-
-    <div class="box">
-      <h2>Key outputs</h2>
-      <ul>
-        <li><a href="summary/all_samples.long.tsv">all_samples.long.tsv</a></li>
-        <li><a href="summary/abundance_matrix.tsv">abundance_matrix.tsv</a></li>
-      </ul>
-    </div>
-
-    <div class="box">
-      <h2>Notes</h2>
-      <ul>
-        <li>Taxonomy is based on BLAST against the provided TEF1 reference FASTA.</li>
-        <li>Cluster representatives are VSEARCH centroids (not a polished consensus yet).</li>
-        <li>You can tighten/relax clustering with <code>cluster_id</code> and <code>min_cluster_reads</code>.</li>
-      </ul>
-    </div>
-  </body>
-  </html>
-  \"\"\"
-
+  html = """<!doctype html>
+  <html><head><meta charset="utf-8"/>
+  <title>Fusarium TEF1 metabarcoding report</title>
+  <style>body{font-family:Arial, sans-serif; margin:24px}.box{border:1px solid #ddd;border-radius:10px;padding:14px;margin:12px 0}</style>
+  </head><body>
+  <h1>Fusarium TEF1 metabarcoding report</h1>
+  <div class="box">
+    <h2>Key outputs</h2>
+    <ul>
+      <li><a href="summary/all_samples.long.tsv">all_samples.long.tsv</a></li>
+      <li><a href="summary/abundance_matrix.tsv">abundance_matrix.tsv</a></li>
+    </ul>
+  </div>
+  </body></html>
+  """
   Path("wf-fusarium-tef1-report.html").write_text(html, encoding="utf-8")
   PY
   """
