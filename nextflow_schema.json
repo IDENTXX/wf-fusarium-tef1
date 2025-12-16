@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fusarium TEF1 metabarcoding",
+  "description": "EPI2ME Desktop-compatible workflow: primer trimming -> length/Q filtering -> VSEARCH clustering -> BLAST against TEF1 reference -> tables + HTML report.",
+  "type": "object",
+  "properties": {
+    "input_options": {
+      "title": "Input",
+      "type": "object",
+      "properties": {
+        "reads": {
+          "title": "Reads root directory",
+          "type": "string",
+          "format": "directory-path",
+          "description": "Directory containing per-sample subfolders with FASTQ.gz files (e.g. READS_ROOT/Sample01/*.fastq.gz)."
+        },
+        "db_fasta": {
+          "title": "TEF1 reference FASTA",
+          "type": "string",
+          "format": "file-path",
+          "description": "FASTA file used to build the BLAST database (e.g. Fusarium-ID TEF1 reference set)."
+        }
+      },
+      "required": ["reads", "db_fasta"]
+    },
+    "primer_options": {
+      "title": "Primer trimming",
+      "type": "object",
+      "properties": {
+        "primer_fwd": {
+          "title": "Forward primer",
+          "type": "string",
+          "default": "",
+          "description": "If empty, primer trimming is skipped."
+        },
+        "primer_rev": {
+          "title": "Reverse primer",
+          "type": "string",
+          "default": "",
+          "description": "If empty, primer trimming is skipped."
+        },
+        "require_primers": {
+          "title": "Discard reads without primer match",
+          "type": "boolean",
+          "default": true
+        },
+        "trim_error_rate": {
+          "title": "Cutadapt error rate",
+          "type": "number",
+          "default": 0.12,
+          "minimum": 0.0,
+          "maximum": 0.3
+        }
+      }
+    },
+    "filter_options": {
+      "title": "Filtering",
+      "type": "object",
+      "properties": {
+        "min_q": {
+          "title": "Minimum Q-score",
+          "type": "integer",
+          "default": 9,
+          "minimum": 0,
+          "maximum": 30
+        },
+        "min_len": {
+          "title": "Minimum length",
+          "type": "integer",
+          "default": 300,
+          "minimum": 1
+        },
+        "max_len": {
+          "title": "Maximum length",
+          "type": "integer",
+          "default": 1200,
+          "minimum": 1
+        }
+      }
+    },
+    "clustering_options": {
+      "title": "Clustering (VSEARCH)",
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "title": "Clustering identity",
+          "type": "number",
+          "default": 0.9,
+          "minimum": 0.5,
+          "maximum": 1.0,
+          "description": "Identity threshold for clustering ONT reads into marker-gene haplotypes/ASVs."
+        },
+        "min_cluster_reads": {
+          "title": "Minimum reads per cluster",
+          "type": "integer",
+          "default": 20,
+          "minimum": 1
+        }
+      }
+    },
+    "blast_options": {
+      "title": "BLAST",
+      "type": "object",
+      "properties": {
+        "blast_topn": {
+          "title": "Max targets per query",
+          "type": "integer",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 50
+        }
+      }
+    },
+    "output_options": {
+      "title": "Output",
+      "type": "object",
+      "properties": {
+        "out_dir": {
+          "title": "Output directory",
+          "type": "string",
+          "format": "directory-path",
+          "default": "output"
+        }
+      }
+    }
+  }
+}
