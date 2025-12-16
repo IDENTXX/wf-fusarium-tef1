@@ -33,10 +33,13 @@ workflow {
   // Build BLAST DB once and broadcast it to all samples
   ref_fa   = Channel.value( file(params.db_fasta) )
   dbdir_ch = MAKEBLASTDB(ref_fa)
-  dbdir_bc = dbdir_ch.broadcast()
 
-  blasted  = BLASTN(kept, dbdir_bc)
-  tax      = JOIN_COUNTS_BLAST(blasted)
+  kept_with_db = kept
+    .combine(dbdir_ch)
+    .map { tup, dbdir -> tuple(tup[0], tup[1], tup[2], dbdir) }
+
+  blasted  = BLASTN(kept_with_db)
+
 
   // Aggregate all sample tax tables
   summary  = AGGREGATE_RESULTS( tax.map{ it[1] }.collect() )
