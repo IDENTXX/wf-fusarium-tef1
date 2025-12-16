@@ -1,7 +1,7 @@
 nextflow.enable.dsl = 2
 
 /*
-  Important: EPI2ME refreshes/inspects workflows without user params.
+  EPI2ME refreshes/inspects workflows without user params.
   So we MUST NOT fail if params.reads / params.db_fasta are not set yet.
 */
 
@@ -14,7 +14,7 @@ workflow {
 
   // Input: READS_ROOT/Sample/*fastq.gz
   Channel
-    .fromPath("${params.reads}/*/*.fastq.gz")
+    .fromPath("${params.reads}/*/*.fastq.gz", checkIfExists: true)
     .map { f -> tuple(f.parent.name, f) }
     .groupTuple()
     .map { sample, files -> tuple(sample, files.sort()) }
@@ -26,23 +26,26 @@ workflow {
   trimmed  = (params.primer_fwd?.trim() && params.primer_rev?.trim()) ? TRIM_CUTADAPT(merged) : merged
   filtered = FILTER_NANOFILT(trimmed)
 
-  fasta    = FASTQ_TO_FASTA(filtered)
-  clustered= CLUSTER_VSEARCH(fasta)
-  kept     = FILTER_CLUSTERS(clustered)
+  fasta     = FASTQ_TO_FASTA(filtered)
+  clustered = CLUSTER_VSEARCH(fasta)
+  kept      = FILTER_CLUSTERS(clustered)
 
-  // Build BLAST DB once and broadcast it to all samples
+  // Build BLAST DB once (from params.db_fasta) and attach to every sample tuple without broadcast()
   ref_fa   = Channel.value( file(params.db_fasta) )
   dbdir_ch = MAKEBLASTDB(ref_fa)
 
   kept_with_db = kept
-    .combine(dbdir_ch)
+    .combine(dbdir_ch)   // cartesian; dbdir_ch emits one item -> attaches it to each sample
     .map { tup, dbdir -> tuple(tup[0], tup[1], tup[2], dbdir) }
 
-  blasted  = BLASTN(kept_with_db)
-
+  blasted = BLASTN(kept_with_db)
+  tax     = JOIN_COUNTS_BLAST(blasted)   // emits (sample, sample.taxonomy.tsv)
 
   // Aggregate all sample tax tables
-  summary  = AGGREGATE_RESULTS( tax.map{ it[1] }.collect() )
+  tax_tables_ch = tax.map { sample, taxfile -> taxfile }
+  tax_tables_list = tax_tables_ch.collect()   // emits ONE item: a list of all taxonomy files
+
+  summary = AGGREGATE_RESULTS(tax_tables_list)
 
   REPORT_HTML(summary)
 }
@@ -63,6 +66,7 @@ process MERGE_FASTQ {
   tuple val(sample), path("${sample}.fastq.gz")
 
   """
+  # Concatenating gz streams is valid
   cat ${reads.join(' ')} > ${sample}.fastq.gz
   """
 }
@@ -219,8 +223,7 @@ process BLASTN {
   container "quay.io/biocontainers/blast:2.16.0--pl5321h6f7f691_0"
 
   input:
-  tuple val(sample), path(counts), path(centroids_fa)
-  path(dbdir)
+  tuple val(sample), path(counts), path(centroids_fa), path(dbdir)
 
   output:
   tuple val(sample), path(counts), path("${sample}.blast.tsv")
@@ -290,11 +293,10 @@ process AGGREGATE_RESULTS {
   path(tables)
 
   output:
-  path("all_samples.long.tsv"),
-  path("abundance_matrix.tsv")
+  tuple path("all_samples.long.tsv"), path("abundance_matrix.tsv")
 
   """
-  # tables can expand to multiple file paths
+  # 'tables' may expand to multiple file paths
   printf "%s\\n" ${tables} > tables.list
 
   python - << 'PY'
