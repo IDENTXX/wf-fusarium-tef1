@@ -349,12 +349,16 @@ process REPORT_HTML {
   python - << 'PY'
   from pathlib import Path
 
-  html = """<!doctype html>
+  html = '''<!doctype html>
   <html><head><meta charset="utf-8"/>
   <title>Fusarium TEF1 metabarcoding report</title>
-  <style>body{font-family:Arial, sans-serif; margin:24px}.box{border:1px solid #ddd;border-radius:10px;padding:14px;margin:12px 0}</style>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    .box { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 12px 0; }
+  </style>
   </head><body>
   <h1>Fusarium TEF1 metabarcoding report</h1>
+
   <div class="box">
     <h2>Key outputs</h2>
     <ul>
@@ -362,8 +366,10 @@ process REPORT_HTML {
       <li><a href="summary/abundance_matrix.tsv">abundance_matrix.tsv</a></li>
     </ul>
   </div>
+
   </body></html>
-  """
+  '''
+
   Path("wf-fusarium-tef1-report.html").write_text(html, encoding="utf-8")
   PY
   """
