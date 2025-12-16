@@ -1,0 +1,68 @@
+{
+  "files": {
+    "workflow-report": {
+      "filepath": "wf-fusarium-tef1-report.html",
+      "title": "Workflow report",
+      "description": "HTML report summarizing key outputs.",
+      "mime-type": "text/html",
+      "optional": false,
+      "type": "aggregated"
+    },
+    "abundance-matrix": {
+      "filepath": "summary/abundance_matrix.tsv",
+      "title": "Abundance matrix",
+      "description": "Sample x taxon matrix (taxon = best_sseqid from BLAST).",
+      "mime-type": "text/tab-separated-values",
+      "optional": false,
+      "type": "aggregated"
+    },
+    "all-samples-long": {
+      "filepath": "summary/all_samples.long.tsv",
+      "title": "All samples (long table)",
+      "description": "Long-format table with cluster counts and best BLAST hit per cluster.",
+      "mime-type": "text/tab-separated-values",
+      "optional": false,
+      "type": "aggregated"
+    },
+    "seqkit-stats": {
+      "filepath": "per_sample/{{ alias }}/qc/{{ alias }}.seqkit.stats.tsv",
+      "title": "Read QC stats (seqkit)",
+      "description": "Basic QC statistics per sample.",
+      "mime-type": "text/tab-separated-values",
+      "optional": false,
+      "type": "per-sample"
+    },
+    "cluster-counts": {
+      "filepath": "per_sample/{{ alias }}/clusters/{{ alias }}.cluster_counts.tsv",
+      "title": "Cluster counts",
+      "description": "Read count per cluster (from VSEARCH UC).",
+      "mime-type": "text/tab-separated-values",
+      "optional": false,
+      "type": "per-sample"
+    },
+    "centroids-kept": {
+      "filepath": "per_sample/{{ alias }}/clusters/{{ alias }}.centroids.kept.fasta",
+      "title": "Cluster representatives (kept)",
+      "description": "FASTA of cluster centroids passing min_cluster_reads.",
+      "mime-type": "text/plain",
+      "optional": false,
+      "type": "per-sample"
+    },
+    "blast-tsv": {
+      "filepath": "per_sample/{{ alias }}/taxonomy/{{ alias }}.blast.tsv",
+      "title": "BLAST hits",
+      "description": "BLASTn results for centroids vs TEF1 database.",
+      "mime-type": "text/tab-separated-values",
+      "optional": true,
+      "type": "per-sample"
+    },
+    "taxonomy-tsv": {
+      "filepath": "per_sample/{{ alias }}/taxonomy/{{ alias }}.taxonomy.tsv",
+      "title": "Cluster taxonomy",
+      "description": "Cluster counts joined with best BLAST hit.",
+      "mime-type": "text/tab-separated-values",
+      "optional": false,
+      "type": "per-sample"
+    }
+  }
+}
