@@ -1,4 +1,4 @@
-nextflow.enable.dsl = 2
+nextflow.enable.dsl=2
 
 /*
   EPI2ME refreshes/inspects workflows without user params.
@@ -30,24 +30,38 @@ workflow {
   clustered = CLUSTER_VSEARCH(fasta)
   kept      = FILTER_CLUSTERS(clustered)
 
-  // Build BLAST DB once (from params.db_fasta) and attach to every sample tuple without broadcast()
+  // Build BLAST DB once (from params.db_fasta) and attach to every sample tuple
   ref_fa   = Channel.value( file(params.db_fasta) )
   dbdir_ch = MAKEBLASTDB(ref_fa)
 
-  kept_with_db = kept
-    .combine(dbdir_ch)   // cartesian; dbdir_ch emits one item -> attaches it to each sample
-    .map { tup, dbdir -> tuple(tup[0], tup[1], tup[2], dbdir) }
+  kept_with_db = kept.combine(dbdir_ch)
+  blasted      = BLASTN(kept_with_db)
 
-  blasted = BLASTN(kept_with_db)
-  tax     = JOIN_COUNTS_BLAST(blasted)   // emits (sample, sample.taxonomy.tsv)
+  tax = JOIN_COUNTS_BLAST(blasted)   // emits (sample, sample.taxonomy.tsv)
 
   // Aggregate all sample tax tables
-  tax_tables_ch = tax.map { sample, taxfile -> taxfile }
+  tax_tables_ch   = tax.map { sample, taxfile -> taxfile }
   tax_tables_list = tax_tables_ch.collect()   // emits ONE item: a list of all taxonomy files
 
   summary = AGGREGATE_RESULTS(tax_tables_list)
 
-  REPORT_HTML(summary)
+  // summary.out ist das Output-Tuple: (all_samples.long.tsv, abundance_matrix.tsv)
+  tsv_ch = summary
+    .map { long_tsv, mat_tsv -> [ long_tsv, mat_tsv ] }
+    .flatten()
+
+  // TSV -> CSV (ein Prozess-Aufruf, zwei Dateien rein)
+  csv_ch = TSV_TO_CSV(tsv_ch)
+
+  // beide CSVs sammeln und in ein Tuple für REPORT_HTML packen
+  csv_list = csv_ch.collect()
+  csv_tuple = csv_list.map { files ->
+      def m = files.collectEntries { [(it.name): it] }
+      tuple(m["all_samples.long.csv"], m["abundance_matrix.csv"])
+  }
+
+  REPORT_HTML(csv_tuple)
+
 }
 
 
@@ -90,7 +104,7 @@ process QC_SEQKIT {
 process TRIM_CUTADAPT {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/reads", mode: 'copy'
-  container "quay.io/biocontainers/cutadapt:4.9--py311h1f90b4d_0"
+  container "python:3.11-slim"
 
   input:
   tuple val(sample), path(fq)
@@ -99,7 +113,10 @@ process TRIM_CUTADAPT {
   tuple val(sample), path("${sample}.trimmed.fastq.gz")
 
   def discard = params.require_primers ? "--discard-untrimmed" : ""
+
   """
+  python -m pip install --no-cache-dir cutadapt==4.9 >/dev/null
+
   cutadapt \
     --revcomp \
     -e ${params.trim_error_rate} \
@@ -114,7 +131,7 @@ process TRIM_CUTADAPT {
 process FILTER_NANOFILT {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/reads", mode: 'copy'
-  container "quay.io/biocontainers/nanofilt:2.8.0--pyhdfd78af_0"
+  container "python:3.11-slim"
 
   input:
   tuple val(sample), path(fq)
@@ -123,16 +140,63 @@ process FILTER_NANOFILT {
   tuple val(sample), path("${sample}.filtered.fastq.gz")
 
   """
-  zcat ${fq} \
-    | NanoFilt -q ${params.min_q} -l ${params.min_len} --maxlength ${params.max_len} \
-    | gzip > ${sample}.filtered.fastq.gz
+  python - << 'PY'
+  import gzip
+  import sys
+
+  infile  = "${fq}"
+  outfile = "${sample}.filtered.fastq.gz"
+
+  min_q   = int(${params.min_q})
+  min_len = int(${params.min_len})
+  max_len = int(${params.max_len})
+
+  def open_in(p):
+    return gzip.open(p, "rt") if p.endswith(".gz") else open(p, "rt")
+
+  kept = 0
+  total = 0
+
+  with open_in(infile) as fin, gzip.open(outfile, "wt") as fout:
+    while True:
+      h = fin.readline()
+      if not h:
+        break
+      seq  = fin.readline().rstrip("\\n")
+      plus = fin.readline()
+      qual = fin.readline().rstrip("\\n")
+      total += 1
+
+      L = len(seq)
+      if L < min_len or L > max_len:
+        continue
+      if len(qual) != L:
+        continue
+
+      # mean Q from Phred+33
+      qsum = 0
+      for c in qual:
+        qsum += (ord(c) - 33)
+      mean_q = qsum / L if L else 0.0
+
+      if mean_q < min_q:
+        continue
+
+      fout.write(h)
+      fout.write(seq + "\\n")
+      fout.write(plus)
+      fout.write(qual + "\\n")
+      kept += 1
+
+  sys.stderr.write(f"FILTER: kept {kept}/{total} reads\\n")
+  PY
   """
 }
 
 process FASTQ_TO_FASTA {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/clusters", mode: 'copy'
-  container "quay.io/biocontainers/seqkit:2.6.1--h9ee0642_0"
+  container "python:3.11-slim"
 
   input:
   tuple val(sample), path(fq)
@@ -141,7 +205,28 @@ process FASTQ_TO_FASTA {
   tuple val(sample), path("${sample}.fasta")
 
   """
-  seqkit fq2fa ${fq} > ${sample}.fasta
+  python - << 'PY'
+  import gzip
+
+  infile  = "${fq}"
+  outfile = "${sample}.fasta"
+
+  def open_maybe_gzip(p, mode="rt"):
+    return gzip.open(p, mode) if p.endswith(".gz") else open(p, mode)
+
+  with open_maybe_gzip(infile, "rt") as fin, open(outfile, "wt") as fout:
+    while True:
+      h = fin.readline()
+      if not h:
+        break
+      seq = fin.readline().strip()
+      fin.readline()  # +
+      fin.readline()  # qual
+      if h.startswith("@"):
+        h = h[1:]
+      fout.write(">" + h.strip() + "\\n")
+      fout.write(seq + "\\n")
+  PY
   """
 }
 
@@ -202,7 +287,7 @@ process FILTER_CLUSTERS {
 
 process MAKEBLASTDB {
   publishDir "${params.out_dir}/refdb", mode: 'copy'
-  container "quay.io/biocontainers/blast:2.16.0--pl5321h6f7f691_0"
+  container "ncbi/blast:2.16.0"
 
   input:
   path(db_fasta)
@@ -213,14 +298,14 @@ process MAKEBLASTDB {
   """
   mkdir -p blastdb
   cp ${db_fasta} blastdb/db.fasta
-  makeblastdb -in blastdb/db.fasta -dbtype nucl -parse_seqids -out blastdb/fusarium_tef1
+  makeblastdb -in blastdb/db.fasta -dbtype nucl -out blastdb/fusarium_tef1
   """
 }
 
 process BLASTN {
   tag "$sample"
   publishDir "${params.out_dir}/per_sample/${sample}/taxonomy", mode: 'copy'
-  container "quay.io/biocontainers/blast:2.16.0--pl5321h6f7f691_0"
+  container "ncbi/blast:2.16.0"
 
   input:
   tuple val(sample), path(counts), path(centroids_fa), path(dbdir)
@@ -315,7 +400,7 @@ process AGGREGATE_RESULTS {
     with t.open() as f:
       r = csv.DictReader(f, delimiter='\\t')
       for row in r:
-        tax = row["best_sseqid"] if row["best_sseqid"] != "NA" else "NA"
+        tax = row["best_hit_title"] if row["best_hit_title"] != "NA" else "NA"
         taxa.add(tax)
         long_rows.append([sample, row["cluster_id"], int(row["read_count"]), tax, row["pident"], row["qcovs"], row["best_hit_title"]])
 
@@ -340,12 +425,39 @@ process AGGREGATE_RESULTS {
   """
 }
 
+process TSV_TO_CSV {
+  publishDir "${params.out_dir}/summary", mode: 'copy'
+  container "python:3.11-slim"
+
+  input:
+  path tsv
+
+  output:
+  path "${tsv.baseName}.csv"
+
+  """
+  python - << 'PY'
+  import csv
+  from pathlib import Path
+
+  tsv = Path("${tsv}")
+  out = tsv.with_suffix(".csv")
+
+  with tsv.open("r", encoding="utf-8", newline="") as fin, out.open("w", encoding="utf-8", newline="") as fout:
+    r = csv.reader(fin, delimiter="\\t")
+    w = csv.writer(fout)
+    for row in r:
+      w.writerow(row)
+  PY
+  """
+}
+
 process REPORT_HTML {
   publishDir "${params.out_dir}", mode: 'copy'
   container "python:3.11-slim"
 
   input:
-  tuple path(long_tsv), path(mat_tsv)
+  tuple path(long_csv), path(mat_csv)
 
   output:
   path("wf-fusarium-tef1-report.html")
@@ -354,12 +466,15 @@ process REPORT_HTML {
   python - << 'PY'
   from pathlib import Path
 
-  html = '''<!doctype html>
+  long_name = Path("${long_csv}").name
+  mat_name  = Path("${mat_csv}").name
+
+  html = f'''<!doctype html>
   <html><head><meta charset="utf-8"/>
   <title>Fusarium TEF1 metabarcoding report</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; }
-    .box { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 12px 0; }
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    .box {{ border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 12px 0; }}
   </style>
   </head><body>
   <h1>Fusarium TEF1 metabarcoding report</h1>
@@ -367,8 +482,8 @@ process REPORT_HTML {
   <div class="box">
     <h2>Key outputs</h2>
     <ul>
-      <li><a href="summary/all_samples.long.tsv">all_samples.long.tsv</a></li>
-      <li><a href="summary/abundance_matrix.tsv">abundance_matrix.tsv</a></li>
+      <li><a href="summary/{long_name}">{long_name}</a></li>
+      <li><a href="summary/{mat_name}">{mat_name}</a></li>
     </ul>
   </div>
 
